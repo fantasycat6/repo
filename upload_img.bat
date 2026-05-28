@@ -1,5 +1,5 @@
 @echo off
 git add .
-git commit -m "assets"
-git push origin main
+git commit -m "web_app"
+git push origin master
 pause
