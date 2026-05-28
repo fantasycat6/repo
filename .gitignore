@@ -75,7 +75,7 @@ Desktop.ini
 
 # Project specific
 GitUpload.cmd
-img_gui\docs\
+Start.cmd
 
 # Python bytecode
 *.pyc
