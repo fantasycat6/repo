@@ -118,17 +118,17 @@ class PDFExtractTool:
                 if file.lower().endswith('.pdf'):
                     source_file = os.path.join(root, file)
                     target_file = os.path.join(target_dir, file)
-                    shutil.move(source_file, target_file)
+                    shutil.copy2(source_file, target_file)
                     extracted_count += 1
-                    self.log(f"✅ 提取: {file}")
+                    self.log(f"✅ 复制: {file}")
                         
         self.log(f"\n📊 操作完成！")
-        self.log(f"   成功提取: {extracted_count} 个PDF文件")
+        self.log(f"   成功复制: {extracted_count} 个PDF文件")
         
         self.open_output_btn.config(state=tk.NORMAL)
         
         if extracted_count > 0:
-            messagebox.showinfo("成功", f"成功提取 {extracted_count} 个PDF文件！")
+            messagebox.showinfo("成功", f"成功复制 {extracted_count} 个PDF文件！")
             
     def open_output(self):
         if self.output_dir and os.path.exists(self.output_dir):

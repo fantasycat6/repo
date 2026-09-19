@@ -61,7 +61,7 @@ class PPTX2MDConverter:
         image_path_frame = tk.Frame(image_frame, bg="#f8f9fa")
         image_path_frame.pack(fill=tk.X)
         
-        default_assets = os.path.join(os.getcwd(), "assets")
+        default_assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
         self.image_dir.set(default_assets.replace("\\", "/"))
         
         image_entry = tk.Entry(image_path_frame, textvariable=self.image_dir, 
@@ -168,7 +168,7 @@ class PPTX2MDConverter:
             ]
             
             result = subprocess.run(cmd, check=True, capture_output=True, 
-                                  text=True, encoding='utf-8')
+                                  text=True, encoding='utf-8', errors='replace')
             
             messagebox.showinfo("成功", "PPTX转Markdown转换完成！")
             
@@ -180,3 +180,4 @@ class PPTX2MDConverter:
     def clear_fields(self):
         self.pptx_path.set("")
         self.output_file.set("")
+        self.image_dir.set("")

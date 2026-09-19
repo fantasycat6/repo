@@ -86,7 +86,7 @@ class ImageCopyTool:
             messagebox.showwarning("警告", "请先选择源文件夹！")
             return
             
-        assets_dir = os.path.join(os.getcwd(), "assets")
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
         if not os.path.exists(assets_dir):
             os.makedirs(assets_dir)
             self.log(f"📂 创建Assets目录: {assets_dir}")

@@ -122,7 +122,7 @@ class MarkdownExtractor:
         md_files = []
         for root, dirs, files in os.walk(source_dir):
             for file in files:
-                if file.endswith('.md'):
+                if file.lower().endswith('.md'):
                     md_files.append((root, file))
                     
         if not md_files:

@@ -248,14 +248,14 @@ class ImageBedToolsApp:
         
     def open_md_attr_tool(self):
         # 使用subprocess启动独立的PyQt应用
-        script_path = os.path.join(os.path.dirname(__file__), 'utils', 'md_attr_standalone.py')
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'utils', 'md_attr_utils.py')
         if os.path.exists(script_path):
             subprocess.Popen([sys.executable, script_path])
         else:
             messagebox.showerror("错误", "Markdown属性工具脚本不存在！")
         
     def open_assets(self):
-        assets_path = os.path.join(os.getcwd(), "assets")
+        assets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
         if os.path.exists(assets_path):
             os.startfile(assets_path)
         else:

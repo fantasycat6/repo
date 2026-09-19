@@ -12,6 +12,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
+# 匹配 YAML frontmatter 块：开头 `---` 行到下一个 `---` 行（容忍空 frontmatter、结尾无换行）
+FRONTMATTER_RE = re.compile(r'^---[ \t]*\n(?:.*?\n)?---[ \t]*(?:\n|\Z)', re.DOTALL)
+
 class MarkdownProcessor(QThread):
     progress_update = pyqtSignal(int)
     file_processed = pyqtSignal(str)
@@ -35,12 +38,14 @@ class MarkdownProcessor(QThread):
         
         for i, file_path in enumerate(self.files):
             try:
-                has_frontmatter = self.has_frontmatter(file_path)
+                # 每个文件只读取一次，避免重复 IO
+                content = self.read_file(file_path)
+                has_frontmatter = self.has_frontmatter(content)
                 if has_frontmatter and not self.replace_existing:
                     skip_count += 1
                     self.file_processed.emit(f"已跳过(已有属性): {os.path.basename(file_path)}")
                 else:
-                    self.process_file(file_path)
+                    self.process_content(file_path, content)
                     success_count += 1
                     if has_frontmatter:
                         self.file_processed.emit(f"已替换: {os.path.basename(file_path)}")
@@ -57,166 +62,179 @@ class MarkdownProcessor(QThread):
             result_msg += f"，跳过 {skip_count} 个已有属性的文件"
         
         if error_messages:
-            self.finished.emit(False, "\n".join(error_messages))
+            # 失败时也保留成功/跳过计数，避免信息丢失
+            msg = f"{result_msg}，失败 {len(error_messages)} 个\n\n" + "\n".join(error_messages)
+            self.finished.emit(False, msg)
         else:
             self.finished.emit(True, result_msg)
     
-    def has_frontmatter(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return content.startswith('---')
+    @staticmethod
+    def read_file(file_path):
+        """读取文件内容，去除 UTF-8 BOM、统一换行为 LF；编码 utf-8 失败时回退 gbk。"""
+        with open(file_path, 'rb') as f:
+            raw = f.read()
+        raw = raw.lstrip(b'\xef\xbb\xbf')
+        try:
+            content = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            content = raw.decode('gbk')
+        return content.replace('\r\n', '\n').replace('\r', '\n')
+    
+    def has_frontmatter(self, content):
+        return FRONTMATTER_RE.match(content) is not None
     
     def extract_existing_published(self, content):
-        lines = content.split(chr(10))
-        for line in lines:
-            line = line.strip()
-            if line.startswith("published:"):
-                parts = line.split(":", 2)
-                if len(parts) >= 2:
-                    return parts[1].strip()
-        return None
+        """仅从前置 frontmatter 内提取已有 published 日期，避免误匹配正文中的同名文本。"""
+        fm_match = FRONTMATTER_RE.match(content)
+        if not fm_match:
+            return None
+        match = re.search(r'^published:\s*(.*?)\s*$', fm_match.group(0), re.MULTILINE)
+        return match.group(1).strip() if match else None
     
-    def process_file(self, file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            raise RuntimeError(f'读取文件失败: {str(e)}')
-        
+    def process_content(self, file_path, content):
         try:
             title = self.extract_title(content, file_path)
             mtime = os.path.getmtime(file_path)
             date_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d')
             
             existing_published = self.extract_existing_published(content)
-            
-            if existing_published:
-                published_date = existing_published
-            else:
-                published_date = date_str
+            published_date = existing_published or date_str
             
             updated_date = datetime.now().strftime('%Y-%m-%d')
             
             frontmatter = self.generate_frontmatter(title, published_date, updated_date)
-            
             content_with_frontmatter = self.add_frontmatter(content, frontmatter)
             
-            with open(file_path, 'w', encoding='utf-8') as f:
+            # newline='' 避免 Windows 下把 LF 转成 CRLF（读取时已统一为 LF）
+            with open(file_path, 'w', encoding='utf-8', newline='') as f:
                 f.write(content_with_frontmatter)
         except Exception as e:
             raise RuntimeError(f'处理文件失败: {str(e)}')
     
     def extract_title(self, content, file_path):
-        lines = content.split('\n')
-        for line in lines:
+        """默认使用文件名（不含扩展名）作为文章标题；
+        仅当文件名缺失（如隐藏文件 ".md"）时才回退到正文一级标题。"""
+        title = os.path.splitext(os.path.basename(file_path))[0].strip()
+        if title and not title.startswith('.'):
+            return self.sanitize_title(title)
+        
+        for line in content.split('\n'):
             line = line.strip()
             if line.startswith('# '):
                 return self.sanitize_title(line[2:].strip())
-            elif line.startswith('## '):
-                return self.sanitize_title(line[3:].strip())
         
-        h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.IGNORECASE)
-        if h1_match:
-            h1_text = h1_match.group(1)
-            h1_text = re.sub(r'<[^>]+>', '', h1_text)
-            h1_text = h1_text.strip()
-            if h1_text:
-                return self.sanitize_title(h1_text)
-        
-        return self.sanitize_title(os.path.splitext(os.path.basename(file_path))[0])
+        # 文件名不可用（如隐藏文件 ".md"）且无一级标题时，返回空字符串
+        return ''
     
     def sanitize_title(self, title):
-        title = title.replace('"', '\\"')
+        # 先转义反斜杠再转义引号：若顺序颠倒，`\` 会在第二步被翻倍成 `\\"`，YAML 解析出错
         title = title.replace('\\', '\\\\')
+        title = title.replace('"', '\\"')
         title = title.replace('\n', ' ')
         title = title.replace('\r', ' ')
         return title
     
+    @staticmethod
+    def yaml_quote(value):
+        """将任意字符串转为安全的 YAML 双引号标量。
+
+        转义顺序与 sanitize_title 一致：先反斜杠后引号，否则 `\` 会在
+        第二步被翻倍成 `\\"`，导致 YAML 解析出错。
+        """
+        value = str(value).replace('\\', '\\\\').replace('"', '\\"')
+        return '"' + value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t') + '"'
+    
     def generate_frontmatter(self, title, published_date, updated_date):
+        p = self.properties
+        q = self.yaml_quote
         lines = ['---']
         lines.append(f'title: "{title}"')
         lines.append(f'published: {published_date}')
         
-        if 'updated' in self.properties and self.properties['updated']:
-            lines.append(f'updated: {self.properties["updated"]}')
+        if p.get('updated'):
+            lines.append(f'updated: {q(p["updated"])}')
         else:
             lines.append(f'updated: {updated_date}')
         
-        if 'description' in self.properties and self.properties['description']:
-            lines.append(f'description: {self.properties["description"]}')
+        if p.get('description'):
+            lines.append(f'description: {q(p["description"])}')
         else:
-            lines.append('description: 这是文章的简短描述')
+            lines.append('description: "这是文章的简短描述"')
         
-        if 'image' in self.properties and self.properties['image']:
-            lines.append(f'image: {self.properties["image"]}')
+        if p.get('image'):
+            lines.append(f'image: {q(p["image"])}')
         else:
             lines.append('image: ../images/firefly1.avif')
         
-        if 'tags' in self.properties and self.properties['tags']:
-            lines.append(f'tags: [{self.properties["tags"]}]')
+        if p.get('tags'):
+            # 兼容中英文逗号分隔、忽略空项，逐项转义保证 YAML 安全
+            tags = [q(t.strip()) for t in p['tags'].replace('，', ',').split(',') if t.strip()]
+            lines.append(f'tags: [{", ".join(tags)}]')
         else:
-            lines.append('tags: [标签]')
+            lines.append('tags: ["标签"]')
         
-        if 'category' in self.properties and self.properties['category']:
-            lines.append(f'category: {self.properties["category"]}')
+        if p.get('category'):
+            lines.append(f'category: {q(p["category"])}')
         else:
-            lines.append('category: 分类')
+            lines.append('category: "分类"')
         
-        if 'author' in self.properties and self.properties['author']:
-            lines.append(f'author: {self.properties["author"]}')
+        if p.get('author'):
+            lines.append(f'author: {q(p["author"])}')
         else:
-            lines.append('author: fantasycat6')
+            lines.append('author: "fantasycat6"')
         
-        if 'draft' in self.properties:
-            lines.append(f'draft: {str(self.properties["draft"]).lower()}')
+        if 'draft' in p:
+            lines.append(f'draft: {str(p["draft"]).lower()}')
         else:
             lines.append('draft: false')
         
-        if 'pinned' in self.properties:
-            lines.append(f'pinned: {str(self.properties["pinned"]).lower()}')
+        if 'pinned' in p:
+            lines.append(f'pinned: {str(p["pinned"]).lower()}')
         else:
             lines.append('pinned: false')
         
-        if 'password' in self.properties and self.properties['password']:
-            lines.append(f'password: {self.properties["password"]}')
+        if p.get('password'):
+            lines.append(f'password: {q(p["password"])}')
         
-        if 'passwordHint' in self.properties and self.properties['passwordHint']:
-            lines.append(f'passwordHint: {self.properties["passwordHint"]}')
+        if p.get('passwordHint'):
+            lines.append(f'passwordHint: {q(p["passwordHint"])}')
         
-        if 'lang' in self.properties and self.properties['lang']:
-            lines.append(f'lang: {self.properties["lang"]}')
+        if p.get('lang'):
+            lines.append(f'lang: {q(p["lang"])}')
         
-        if 'licenseName' in self.properties and self.properties['licenseName']:
-            lines.append(f'licenseName: {self.properties["licenseName"]}')
+        if p.get('licenseName'):
+            lines.append(f'licenseName: {q(p["licenseName"])}')
         
-        if 'licenseUrl' in self.properties and self.properties['licenseUrl']:
-            lines.append(f'licenseUrl: {self.properties["licenseUrl"]}')
+        if p.get('licenseUrl'):
+            lines.append(f'licenseUrl: {q(p["licenseUrl"])}')
         
-        if 'sourceLink' in self.properties and self.properties['sourceLink']:
-            lines.append(f'sourceLink: {self.properties["sourceLink"]}')
+        if p.get('sourceLink'):
+            lines.append(f'sourceLink: {q(p["sourceLink"])}')
         
-        if 'comment' in self.properties:
-            lines.append(f'comment: {str(self.properties["comment"]).lower()}')
+        if 'comment' in p:
+            lines.append(f'comment: {str(p["comment"]).lower()}')
         
-        if 'slug' in self.properties and self.properties['slug']:
-            lines.append(f'slug: {self.properties["slug"]}')
+        if p.get('slug'):
+            lines.append(f'slug: {q(p["slug"])}')
         
         lines.append('---')
         return '\n'.join(lines)
     
     def add_frontmatter(self, content, frontmatter):
-        if content.startswith('---'):
-            end_match = re.search(r'^---\s*$', content, re.MULTILINE)
-            if end_match:
-                second_end = content.find('---', end_match.end())
-                if second_end != -1:
-                    second_end = content.find('\n', second_end) + 1
-                    return frontmatter + '\n' + content[second_end:]
+        """已有 frontmatter 时用新 frontmatter 替换，否则在开头插入。
+
+        使用 FRONTMATTER_RE 精确定位前置块，可正确处理结尾 ```---``` 无换行
+        （EOF）的情况，避免旧逻辑中 find('\n') 返回 -1 导致内容被重复。
+        """
+        fm_match = FRONTMATTER_RE.match(content)
+        if fm_match:
+            # 原 frontmatter 直接整体替换，正文原样保留
+            return frontmatter + content[fm_match.end():]
         return frontmatter + '\n\n' + content
 
-class MarkdownAttrWindow(QMainWindow):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
         self.is_dark_theme = False
         self.init_ui()
     
@@ -738,7 +756,7 @@ class MarkdownAttrWindow(QMainWindow):
                 dirs[:] = []
             
             for file in files:
-                if file.endswith('.md'):
+                if file.lower().endswith('.md'):
                     md_files.append(os.path.join(root, file))
         
         return md_files
@@ -831,8 +849,12 @@ class MarkdownAttrWindow(QMainWindow):
         self.log_text.append(f'[{timestamp}] {message}')
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
-def open_md_attr_tool(parent=None):
-    """打开Markdown属性工具的便捷函数"""
-    window = MarkdownAttrWindow(parent)
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    
+    window = MainWindow()
     window.show()
-    return window
+    sys.exit(app.exec_())
+
+
